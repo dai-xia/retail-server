@@ -1,0 +1,96 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>MainWindow</class>
+ <widget class="QMainWindow" name="MainWindow">
+  <property name="geometry">
+   <rect>
+    <x>0</x>
+    <y>0</y>
+    <width>1024</width>
+    <height>600</height>
+   </rect>
+  </property>
+  <property name="windowTitle">
+   <string>Unmanned Retail System Server</string>
+  </property>
+  <widget class="QWidget" name="centralWidget">
+   <layout class="QVBoxLayout" name="verticalLayout">
+    <item>
+     <widget class="QLabel" name="label">
+      <property name="text">
+       <string>Server Log:</string>
+      </property>
+     </widget>
+    </item>
+    <item>
+     <widget class="QTextEdit" name="textEdit_log">
+      <property name="readOnly">
+       <bool>true</bool>
+      </property>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+  <widget class="QMenuBar" name="menuBar">
+   <property name="geometry">
+    <rect>
+     <x>0</x>
+     <y>0</y>
+     <width>1024</width>
+     <height>21</height>
+    </rect>
+   </property>
+   <widget class="QMenu" name="menuSystem">
+    <property name="title">
+     <string>System</string>
+    </property>
+    <action name="action_member">
+     <property name="text">
+      <string>Member Management</string>
+     </property>
+    </action>
+    <action name="action_goods">
+     <property name="text">
+      <string>Goods Management</string>
+     </property>
+    </action>
+    <action name="action_order">
+     <property name="text">
+      <string>Order Management</string>
+     </property>
+    </action>
+    <action name="action_client">
+     <property name="text">
+      <string>Client Monitor</string>
+     </property>
+    </action>
+    <action name="action_monitor">
+     <property name="text">
+      <string>Real-time Monitor</string>
+     </property>
+    </action>
+    <action name="action_ota">
+     <property name="text">
+      <string>OTA Upgrade Management</string>
+     </property>
+    </action>
+    <action name="action_exit">
+     <property name="text">
+      <string>Exit</string>
+     </property>
+    </action>
+    <addaction name="action_member"/>
+    <addaction name="action_goods"/>
+    <addaction name="action_order"/>
+    <addaction name="action_client"/>
+    <addaction name="action_monitor"/>
+    <addaction name="action_ota"/>
+    <addaction name="action_exit"/>
+   </widget>
+   <addaction name="menuSystem"/>
+  </widget>
+  <widget class="QStatusBar" name="statusbar"/>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

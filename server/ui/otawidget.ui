@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>OtaWidget</class>
+ <widget class="QWidget" name="OtaWidget">
+  <property name="geometry">
+   <rect><x>0</x><y>0</y><width>1200</width><height>700</height></rect>
+  </property>
+  <property name="windowTitle"><string>OTA升级管理</string></property>
+  <layout class="QVBoxLayout" name="verticalLayout">
+   <item>
+    <widget class="QGroupBox" name="groupBox_upload">
+     <property name="title"><string>上传新版本</string></property>
+     <layout class="QHBoxLayout" name="horizontalLayout_upload">
+      <item><widget class="QLabel" name="label_version"><property name="text"><string>版本号:</string></property></widget></item>
+      <item><widget class="QLineEdit" name="lineEdit_version"><property name="placeholderText"><string>如: 2.0.0</string></property></widget></item>
+      <item><widget class="QLabel" name="label_desc"><property name="text"><string>更新说明:</string></property></widget></item>
+      <item><widget class="QLineEdit" name="lineEdit_desc"><property name="placeholderText"><string>如: 修复支付bug</string></property></widget></item>
+      <item><widget class="QLabel" name="label_type"><property name="text"><string>类型:</string></property></widget></item>
+      <item><widget class="QComboBox" name="comboBox_type">
+        <item><property name="text"><string>应用OTA(APP)</string></property></item>
+        <item><property name="text"><string>系统OTA(SYSTEM)</string></property></item>
+      </widget></item>
+      <item><widget class="QCheckBox" name="checkBox_force"><property name="text"><string>强制升级</string></property></widget></item>
+      <item><widget class="QPushButton" name="btn_select_file"><property name="text"><string>选择文件</string></property></widget></item>
+      <item><widget class="QPushButton" name="btn_upload"><property name="text"><string>上传升级包</string></property></widget></item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QLabel" name="label_selected_file">
+     <property name="text"><string>未选择文件</string></property>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupBox_list">
+     <property name="title"><string>版本列表</string></property>
+     <layout class="QVBoxLayout" name="verticalLayout_list">
+      <item>
+       <widget class="QTableWidget" name="tableWidget_versions"/>
+      </item>
+      <item>
+       <layout class="QHBoxLayout" name="horizontalLayout_actions">
+        <item><widget class="QPushButton" name="btn_refresh"><property name="text"><string>刷新列表</string></property></widget></item>
+        <item><widget class="QPushButton" name="btn_push_selected"><property name="text"><string>推送给选中客户端</string></property></widget></item>
+        <item><widget class="QPushButton" name="btn_push_all"><property name="text"><string>推送给所有客户端</string></property></widget></item>
+        <item><widget class="QPushButton" name="btn_delete_version"><property name="text"><string>删除选中版本</string></property></widget></item>
+       </layout>
+      </item>
+     </layout>
+    </widget>
+   </item>
+   <item>
+    <widget class="QGroupBox" name="groupBox_clients">
+     <property name="title"><string>在线客户端</string></property>
+     <layout class="QVBoxLayout" name="verticalLayout_clients">
+      <item><widget class="QTableWidget" name="tableWidget_clients"/></item>
+     </layout>
+    </widget>
+   </item>
+  </layout>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>

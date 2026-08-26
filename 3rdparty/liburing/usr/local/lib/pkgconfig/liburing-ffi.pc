@@ -1,0 +1,12 @@
+prefix=/usr/local
+exec_prefix=${prefix}
+libdir=/usr/local/lib
+includedir=/usr/local/include
+
+Name: liburing
+Version: 2.6
+Description: io_uring FFI library
+URL: https://git.kernel.dk/cgit/liburing/
+
+Libs: -L${libdir} -luring-ffi
+Cflags: -I${includedir}

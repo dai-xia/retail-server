@@ -2,63 +2,6 @@
 
 无人零售自助收银系统的服务端。基于 C/S 架构，管理多台收银终端，负责会员、商品、订单、库存、OTA 等核心业务。
 
-## 技术亮点
-
-### 自研 C 网络框架：epoll / io_uring 双后端
-
-服务端没有使用现成的网络库，而是自己实现了一套高性能 C 网络框架，核心是**主/子 Reactor 架构**，并通过 `USE_IOURING` 宏在编译期切换 epoll / io_uring 两个后端，业务代码完全一致：
-
-```
-                    ┌─────────────────┐
-                    │   主 Reactor     │
-                    │  accept 线程     │
-                    │ epoll/io_uring  │
-                    └────────┬────────┘
-                             │ 新连接分发
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-     ┌────────────┐  ┌────────────┐  ┌────────────┐
-     │ 子 Reactor 0│  │ 子 Reactor 1│  │ 子 Reactor 3│
-     │epoll/uring │  │epoll/uring │  │epoll/uring │
-     └──────┬─────┘  └──────┬─────┘  └──────┬─────┘
-            └───────────────┼───────────────┘
-                            ▼ 可读事件
-                    ┌───────▼────────┐
-                    │   线程池(8线程) │
-                    │   业务任务处理   │
-                    └────────────────┘
-```
-
-**两个后端（编译期二选一）**
-
-- **epoll 后端**（`nf_epoll.c`）：经典的主/子 Reactor + 边缘触发，单次 `epoll_wait` 最多取出 1024 个事件批量处理。
-- **io_uring 后端**（`nf_iouring.c`）：把 accept / read / write 全部改成异步 SQE 提交 + CQE 收割，进一步减少系统调用与用户态/内核态切换。
-
-### io_uring 后端的关键设计
-
-io_uring 后端不是简单地把 epoll 换成 io_uring，而是针对高性能网络做了以下优化：
-
-- **SQPOLL 内核轮询**：每个子 Reactor 用 `io_uring_queue_init(1024, &ring, IORING_SETUP_SQPOLL)` 创建 1024 项 SQ 环，由内核线程自动收割 SQ，避免每次提交都进入内核；内核不支持 SQPOLL 时自动降级为普通模式（`flags=0`）。
-- **主 Reactor 专用环**：主线程用独立的 256 项 ring（`io_uring_queue_init(256, ..., 0)`），只做 accept，不启用 SQPOLL。
-- **固定缓冲区零拷贝**：预分配 512 个 64KB 读缓冲，通过 `io_uring_register_buffers` 注册，读请求用 `io_uring_prep_read_fixed` 直接写入固定缓冲，省去每次 read 的缓冲分配；注册失败时自动回退到逐连接缓冲。
-- **eventfd 跨线程唤醒**：主线程把新连接交给子 Reactor、或外部请求关闭连接时，通过 eventfd（`UR_OP_EVENT`）唤醒子线程。
-- **CQE user_data 操作标签**：借用 64 位虚拟地址高 16 位中的高 2 位编码操作类型（READ / WRITE / EVENT / CANCEL），低 62 位存连接指针，一次 CQE 收割即可路由到对应处理。
-- **SQE 耗尽重试队列**：SQ 环满导致 `submit_read` 提交失败时，连接进入 256 项重试队列，下一轮重新提交，不丢事件。
-- **写重复抑制**：用 `write_sqe_pending` 标志避免同一 fd 同时存在多个写 SQE。
-- **批量 CQE 收割**：`io_uring_for_each_cqe` + `io_uring_cq_advance` 一次处理多个完成事件，减少 syscall 次数。
-- **关闭语义**：关闭带在途读请求的连接时，用 `io_uring_prep_cancel`（`UR_OP_CANCEL`）取消在途读，避免 fd 复用后收到脏数据。
-
-- **关键参数**：epoll 单次最多 1024 事件；io_uring 子 Reactor SQ 环 1024 项、主 Reactor 256 项、固定缓冲池 512×64KB；读缓冲 64KB、4 个子 Reactor、8 个工作线程、任务队列 256。
-- 主线程只负责 accept，读写全部下沉到子 Reactor，业务处理交给线程池，避免单线程阻塞。
-
-### C++ 与 C 的桥接
-
-Qt 界面层是 C++，网络框架是 C。`CFrameworkAdapter` 把 C 回调（`on_accept` / `on_recv` / `on_close`）转成 Qt 信号，业务层用信号槽处理，处理完再通过桥接发回 C 框架。
-
-### 按 client_id 的数据隔离
-
-服务端用 MySQL 存全局数据，但商品、库存按 `client_id` 隔离——每个收银终端只看到自己的数据。连接层的 `fd` 和业务层的 `client_id` 通过映射表解耦，断线重连不影响业务标识。
-
 ## 目录结构
 
 ```
@@ -79,6 +22,65 @@ common/         共享库（AES 加密 / 日志 / cJSON / 公共类型）
 3rdparty/liburing/   内置 liburing 头文件
 scripts/setup_liburing.sh   安装 liburing
 ```
+
+## 网络框架
+
+没用现成网络库，自己写了一套 C 网络框架，核心是主/子 Reactor 多线程模型，通过 `USE_IOURING` 宏在编译期切 epoll 或 io_uring，业务代码不动。
+
+```
+                    ┌─────────────────┐
+                    │   主 Reactor     │
+                    │  accept 线程     │
+                    └────────┬────────┘
+                             │ 新连接分发
+              ┌──────────────┼──────────────┐
+              ▼              ▼              ▼
+     ┌────────────┐  ┌────────────┐  ┌────────────┐
+     │ 子 Reactor 0│  │ 子 Reactor 1│  │ 子 Reactor 3│
+     │epoll/uring │  │epoll/uring │  │epoll/uring │
+     └──────┬─────┘  └──────┬─────┘  └──────┬─────┘
+            └───────────────┼───────────────┘
+                            ▼ 可读事件
+                    ┌───────▼────────┐
+                    │   线程池(8线程) │
+                    │   业务任务处理   │
+                    └────────────────┘
+```
+
+### 双 IO 引擎
+
+- **epoll 后端**（`nf_epoll.c`）：边缘触发，单次 `epoll_wait` 最多取 1024 个事件批量处理。
+- **io_uring 后端**（`nf_iouring.c`）：把 accept / read / write 都改成异步 SQE 提交 + CQE 收割，减少系统调用和用户态/内核态切换。
+
+两个后端的长连接 ping 纯 IO 压测（200 并发）对比：io_uring 后端 QPS 是 epoll 的约 3.15 倍，P99 延迟约降为 epoll 的 1/2.8。
+
+### io_uring 内核交互
+
+- 每个子 Reactor 用 `io_uring_queue_init(1024, ..., IORING_SETUP_SQPOLL)` 建 1024 项 SQ 环，由内核线程自动收割 SQ；不支持 SQPOLL 时降级普通模式。
+- 子 Reactor 预注册 512 个 64KB 固定读缓冲（`io_uring_register_buffers`），读请求用 `io_uring_prep_read_fixed` 直接写入固定缓冲，省去每次 read 的地址校验和数据拷贝；注册失败回退到逐连接缓冲。
+- CQE 的 `user_data` 高位 2 位编码操作类型（READ/WRITE/EVENT/CANCEL），低 62 位放连接指针，内核原样透传，收割时不用查表就能定位业务对象。
+- 用 `io_uring_for_each_cqe` + `io_uring_cq_advance` 批量收割完成事件。
+
+### 连接生命周期
+
+- 连接对象用原子引用计数（`__sync_fetch_and_add/sub`）管理，业务线程和 IO 线程都能安全持有。
+- 关闭的连接进 `closed_conns` 缓冲，统一在子线程事件循环里回收，从架构上避免多线程 use-after-free。
+- 关闭带在途读的连接时用 `io_uring_prep_cancel` 取消飞行中的 SQE，避免 fd 复用后收到脏数据。
+- SQ 环满导致提交失败时，连接进 `retry_conns` 重试队列，下一轮无损重试。
+
+### 协议与调度
+
+- 应用层协议：`4 字节大端长度头 + JSON`。连接级残留缓冲区处理粘包/半包，一个完整帧才触发 `on_recv`。
+- 写路径用链表组织的异步写队列，`eventfd` 跨线程唤醒子 Reactor，避免多线程并发写同一连接。
+- 线程池任务带 `func + cleanup` 双回调，异常路径（线程池销毁/任务丢弃）也能正确释放连接引用，不泄漏。
+
+## C++ 与 C 的桥接
+
+Qt 界面层是 C++，网络框架是 C。`CFrameworkAdapter` 把 C 回调（`on_accept` / `on_recv` / `on_close`）转成 Qt 信号，业务层用信号槽处理，处理完再通过桥接发回 C 框架。
+
+## 按 client_id 的数据隔离
+
+服务端用 MySQL 存全局数据，但商品、库存按 `client_id` 隔离——每个收银终端只看到自己的数据。连接层的 `fd` 和业务层的 `client_id` 通过映射表解耦，断线重连不影响业务标识。
 
 ## 通信协议
 

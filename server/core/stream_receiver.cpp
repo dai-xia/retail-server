@@ -19,6 +19,11 @@ StreamReceiver::StreamReceiver(QObject *parent)
     , m_videoStreamIdx(-1)
     , m_frame(nullptr)
     , m_pkt(nullptr)
+    , m_audioCodecCtx(nullptr)
+    , m_swrCtx(nullptr)
+    , m_audioStreamIdx(-1)
+    , m_audioFrame(nullptr)
+    , m_pcm(nullptr)
 #endif
     , m_running(0)
     , m_width(0)
@@ -94,6 +99,10 @@ bool StreamReceiver::open(const QString &url)
     m_frame = av_frame_alloc();
     m_pkt   = av_packet_alloc();
 
+    /* Audio is optional: if the client pushed AAC, decode + play it; otherwise
+     * keep video-only without failing the whole open. */
+    openAudio();
+
     qDebug() << "[StreamReceiver] stream opened:" << url
              << m_width << "x" << m_height;
     return true;
@@ -107,6 +116,8 @@ void StreamReceiver::close()
 {
     m_running.store(0);
     wait(3000);
+
+    closeAudio();
 
 #ifdef USE_FFMPEG
     if (m_swsCtx) { sws_freeContext(m_swsCtx); m_swsCtx = nullptr; }
@@ -144,6 +155,17 @@ void StreamReceiver::run()
                 emit errorOccurred("读取帧失败");
             }
             break;
+        }
+
+        if (m_pkt->stream_index == m_audioStreamIdx) {
+            /* Audio packet: decode AAC and play via ALSA */
+            ret = avcodec_send_packet(m_audioCodecCtx, m_pkt);
+            av_packet_unref(m_pkt);
+            if (ret < 0) continue;
+            while (avcodec_receive_frame(m_audioCodecCtx, m_audioFrame) == 0) {
+                playAudioFrame();
+            }
+            continue;
         }
 
         if (m_pkt->stream_index != m_videoStreamIdx) {
@@ -185,5 +207,107 @@ QImage StreamReceiver::convertFrameToQImage()
     return image;
 #else
     return QImage();
+#endif
+}
+
+bool StreamReceiver::openAudio()
+{
+#ifdef USE_FFMPEG
+    if (!m_fmtCtx) return false;
+
+    /* Audio stream is optional: older clients may push video only */
+    m_audioStreamIdx = av_find_best_stream(m_fmtCtx, AVMEDIA_TYPE_AUDIO, -1, -1, NULL, 0);
+    if (m_audioStreamIdx < 0) {
+        qDebug() << "[StreamReceiver] no audio stream, video-only";
+        return false;
+    }
+
+    const AVCodec *codec = avcodec_find_decoder(
+        m_fmtCtx->streams[m_audioStreamIdx]->codecpar->codec_id);
+    if (!codec) {
+        qWarning() << "[StreamReceiver] audio decoder not found";
+        m_audioStreamIdx = -1;
+        return false;
+    }
+
+    m_audioCodecCtx = avcodec_alloc_context3(codec);
+    avcodec_parameters_to_context(m_audioCodecCtx,
+                                   m_fmtCtx->streams[m_audioStreamIdx]->codecpar);
+    if (avcodec_open2(m_audioCodecCtx, codec, NULL) < 0) {
+        qWarning() << "[StreamReceiver] audio decoder open failed";
+        avcodec_free_context(&m_audioCodecCtx);
+        m_audioStreamIdx = -1;
+        return false;
+    }
+
+    /* AAC decodes to FLTP planar; ALSA needs S16LE interleaved */
+    uint64_t out_layout = av_get_default_channel_layout(m_audioCodecCtx->channels);
+    m_swrCtx = swr_alloc_set_opts(NULL,
+        out_layout, AV_SAMPLE_FMT_S16, m_audioCodecCtx->sample_rate,
+        m_audioCodecCtx->channel_layout, m_audioCodecCtx->sample_fmt,
+        m_audioCodecCtx->sample_rate, 0, NULL);
+    if (!m_swrCtx || swr_init(m_swrCtx) < 0) {
+        qWarning() << "[StreamReceiver] swr init failed";
+        closeAudio();
+        return false;
+    }
+
+    m_audioFrame = av_frame_alloc();
+
+    /* Open ALSA playback (default device); on headless/VM this may fail, and
+     * we degrade to decode-only instead of failing the whole monitor. */
+    if (snd_pcm_open(&m_pcm, "default", SND_PCM_STREAM_PLAYBACK, 0) < 0) {
+        qWarning() << "[StreamReceiver] ALSA open failed, decode-only";
+        m_pcm = nullptr;
+    } else {
+        snd_pcm_set_params(m_pcm,
+                           SND_PCM_FORMAT_S16_LE,
+                           SND_PCM_ACCESS_RW_INTERLEAVED,
+                           m_audioCodecCtx->channels,
+                           m_audioCodecCtx->sample_rate,
+                           1,            /* allow resample */
+                           500000);      /* 500ms latency */
+    }
+
+    qDebug() << "[StreamReceiver] audio opened:" << m_audioCodecCtx->sample_rate
+             << "Hz, channels=" << m_audioCodecCtx->channels;
+    return true;
+#else
+    return false;
+#endif
+}
+
+void StreamReceiver::closeAudio()
+{
+#ifdef USE_FFMPEG
+    if (m_pcm) { snd_pcm_close(m_pcm); m_pcm = nullptr; }
+    if (m_audioFrame) { av_frame_free(&m_audioFrame); m_audioFrame = nullptr; }
+    if (m_swrCtx) { swr_free(&m_swrCtx); m_swrCtx = nullptr; }
+    if (m_audioCodecCtx) { avcodec_free_context(&m_audioCodecCtx); m_audioCodecCtx = nullptr; }
+    m_audioStreamIdx = -1;
+#endif
+}
+
+void StreamReceiver::playAudioFrame()
+{
+#ifdef USE_FFMPEG
+    if (!m_audioFrame || !m_swrCtx || !m_audioCodecCtx) return;
+
+    int channels = m_audioCodecCtx->channels;
+    int out_samples = av_rescale_rnd(
+        swr_get_delay(m_swrCtx, m_audioCodecCtx->sample_rate) + m_audioFrame->nb_samples,
+        m_audioCodecCtx->sample_rate, m_audioCodecCtx->sample_rate, AV_ROUND_UP);
+
+    uint8_t *out = nullptr;
+    av_samples_alloc(&out, NULL, channels, out_samples, AV_SAMPLE_FMT_S16, 0);
+    int got = swr_convert(m_swrCtx, &out, out_samples,
+                          (const uint8_t **)m_audioFrame->data, m_audioFrame->nb_samples);
+    if (got > 0 && m_pcm) {
+        snd_pcm_sframes_t written = snd_pcm_writei(m_pcm, out, got);
+        if (written < 0) {
+            snd_pcm_recover(m_pcm, (int)written, 1);
+        }
+    }
+    av_freep(&out);
 #endif
 }

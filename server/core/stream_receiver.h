@@ -11,6 +11,8 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
+#include <libswresample/swresample.h>
+#include <alsa/asoundlib.h>
 }
 #endif
 
@@ -25,6 +27,7 @@ extern "C" {
  *   5. avcodec_open2() - open the decoder
  *   6. av_read_frame() -> avcodec_send_packet() -> avcodec_receive_frame()
  *   7. sws_scale() YUV420P -> RGB24 -> QImage
+ *   8. AAC decode -> swr_convert() FLTP -> S16LE -> ALSA playback
  */
 class StreamReceiver : public QThread
 {
@@ -46,6 +49,11 @@ protected:
     void run() override;  ///< thread main loop: read_frame -> decode -> emit
 
 private:
+    QImage convertFrameToQImage();  ///< YUV420P -> RGB24 -> QImage
+    bool openAudio();               ///< find + open audio stream decoder, init ALSA
+    void closeAudio();              ///< close audio decoder + ALSA
+    void playAudioFrame();          ///< decode FLTP -> S16LE -> ALSA write
+
 #ifdef USE_FFMPEG
     AVFormatContext *m_fmtCtx;
     AVCodecContext  *m_videoCodecCtx;
@@ -53,13 +61,17 @@ private:
     int             m_videoStreamIdx;
     AVFrame         *m_frame;
     AVPacket        *m_pkt;
+
+    AVCodecContext  *m_audioCodecCtx;
+    SwrContext      *m_swrCtx;
+    int             m_audioStreamIdx;
+    AVFrame         *m_audioFrame;
+    snd_pcm_t       *m_pcm;
 #endif
     QString          m_url;
     QAtomicInt       m_running;
     int              m_width;
     int              m_height;
-
-    QImage convertFrameToQImage();  ///< YUV420P -> RGB24 -> QImage
 };
 
 #endif // STREAM_RECEIVER_H

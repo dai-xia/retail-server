@@ -21,9 +21,10 @@ find_library(FFMPEG_AVCODEC avcodec)
 find_library(FFMPEG_AVFORMAT avformat)
 find_library(FFMPEG_AVUTIL avutil)
 find_library(FFMPEG_SWSCALE swscale)
+find_library(FFMPEG_SWRESAMPLE swresample)
 if(FFMPEG_AVCODEC AND FFMPEG_AVFORMAT AND FFMPEG_AVUTIL AND FFMPEG_SWSCALE)
     set(FFMPEG_FOUND TRUE)
-    set(FFMPEG_LIBRARIES ${FFMPEG_AVCODEC} ${FFMPEG_AVFORMAT} ${FFMPEG_AVUTIL} ${FFMPEG_SWSCALE})
+    set(FFMPEG_LIBRARIES ${FFMPEG_AVCODEC} ${FFMPEG_AVFORMAT} ${FFMPEG_AVUTIL} ${FFMPEG_SWSCALE} ${FFMPEG_SWRESAMPLE})
     set(FFMPEG_INCLUDE_DIRS ${FFMPEG_INCLUDE_DIR})
     message(STATUS "Found FFmpeg: ${FFMPEG_LIBRARIES}")
     add_definitions(-DUSE_FFMPEG)
@@ -31,6 +32,14 @@ else()
     message(STATUS "FFmpeg not found, building without video decoding (monitor disabled)")
     set(FFMPEG_LIBRARIES "")
     set(FFMPEG_INCLUDE_DIRS "")
+endif()
+
+# ========== ALSA (audio playback on the monitor side) ==========
+find_library(ALSA_LIBRARY asound)
+if(ALSA_LIBRARY)
+    message(STATUS "Found ALSA: ${ALSA_LIBRARY}")
+else()
+    message(STATUS "ALSA not found, monitor audio playback disabled")
 endif()
 
 # ========== liburing (prefer pkg-config, fall back to vendored 3rdparty) ==========
@@ -159,6 +168,9 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     pthread
     crypt
 )
+if(ALSA_LIBRARY)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ${ALSA_LIBRARY})
+endif()
 
 # liburing linkage
 if(LIBURING_LIBRARY_DIRS)

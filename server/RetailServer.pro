@@ -81,10 +81,19 @@ LIBS += -lpthread -lssl -lcrypto
 FFMPEG_EXISTS = $$system(pkg-config --exists libavcodec 2>/dev/null && echo yes || echo no)
 equals(FFMPEG_EXISTS, "yes") {
     DEFINES += USE_FFMPEG
-    LIBS += -lavcodec -lavformat -lavutil -lswscale
+    LIBS += -lavcodec -lavformat -lavutil -lswscale -lswresample
     message("FFmpeg: found, video decoding/monitor enabled")
 } else {
     message("FFmpeg: not found, monitor disabled")
+}
+
+# ALSA (monitor audio playback)
+ALSA_EXISTS = $$system(pkg-config --exists alsa 2>/dev/null && echo yes || echo no)
+equals(ALSA_EXISTS, "yes") {
+    LIBS += -lasound
+    message("ALSA: found, monitor audio playback enabled")
+} else {
+    message("ALSA: not found, monitor audio playback disabled")
 }
 
 # Configuration

@@ -13,7 +13,7 @@ typedef struct {
 static void recv_task_func(void *arg)
 {
     recv_task_t *task = (recv_task_t *)arg;
-    if (task->nf && task->nf->on_recv && !task->conn->closed) {
+    if (task->nf && task->nf->on_recv && !net_conn_is_closed(task->conn)) {
         task->nf->on_recv(task->conn, task->data, task->len);
     }
     net_conn_unref(task->conn);
@@ -109,7 +109,7 @@ void net_queue_write(connection_t *c, const char *data, int len)
     c->write_tail = wt;
     c->write_count++;
 
-    if (c->write_head == wt && !c->closed) {
+    if (c->write_head == wt && !net_conn_is_closed(c)) {
         need_submit = 1;
     }
     pthread_mutex_unlock(&c->write_lock);
@@ -152,7 +152,7 @@ void net_conn_unref(connection_t *c)
  */
 int net_send_packet(connection_t *conn, const char *json_data)
 {
-    if (!conn || !json_data || conn->closed) return -1;
+    if (!conn || !json_data || net_conn_is_closed(conn)) return -1;
     int json_len = strlen(json_data);
     if (json_len > NET_BUF_SIZE - NET_HEAD_LEN) return -1;
 
@@ -173,7 +173,7 @@ int net_send_packet(connection_t *conn, const char *json_data)
  */
 int net_send_binary(connection_t *conn, const char *data, int len)
 {
-    if (!conn || !data || conn->closed || len <= 0) return -1;
+    if (!conn || !data || net_conn_is_closed(conn) || len <= 0) return -1;
     if (len > NET_BUF_SIZE - NET_HEAD_LEN) return -1;
 
     int total = NET_HEAD_LEN + len;
@@ -189,7 +189,9 @@ int net_send_binary(connection_t *conn, const char *data, int len)
 
 void net_close_connection(connection_t *conn)
 {
-    if (!conn || conn->closed) return;
+    /* Fast-path check only; the authoritative exactly-once guard is the CAS
+     * inside the backend close_conn implementation. */
+    if (!conn || net_conn_is_closed(conn)) return;
     printf("close connection: %s:%d (fd=%d)\n", conn->client_ip, conn->client_port, conn->fd);
     if (conn->nf && conn->nf->ops && conn->nf->ops->close_conn) {
         conn->nf->ops->close_conn(conn);

@@ -157,7 +157,7 @@ static void destroy_buf_pool(iour_sub_t *sr)
  * Caller must hold sr->conn_mtx (the cap<=0 path calls _locked to avoid recursive lock). */
 static int submit_read(iour_sub_t *sr, connection_t *c)
 {
-    if (c->closed) return -1;
+    if (net_conn_is_closed(c)) return -1;
 
     conn_iouring_data_t *idata = (conn_iouring_data_t *)c->backend_data;
     if (!idata) return -1;
@@ -209,7 +209,7 @@ static int submit_read(iour_sub_t *sr, connection_t *c)
 /* Caller must hold sr->conn_mtx. c must not be closed. */
 static void enqueue_retry(iour_sub_t *sr, connection_t *c)
 {
-    if (c->closed) return;
+    if (net_conn_is_closed(c)) return;
     if (sr->retry_count >= 256) {
         /* Retry queue also full: fail fast and close. Caller holds conn_mtx,
          * use _locked to avoid recursive deadlock. */
@@ -235,7 +235,7 @@ static void process_retry(iour_sub_t *sr)
     for (int i = 0; i < sr->retry_count; i++) {
         connection_t *c = sr->retry_conns[i];
         sr->retry_conns[i] = NULL;
-        if (!c || c->closed) {
+        if (!c || net_conn_is_closed(c)) {
             /* Closed (possibly cross-thread via nf_iouring_close_conn): drop the retry ref */
             if (c) net_conn_unref(c);
             continue;
@@ -243,7 +243,7 @@ static void process_retry(iour_sub_t *sr)
         if (submit_read(sr, c) == 0) {
             /* Success: drop the retry-queue ref (submit_read took its own in-flight ref) */
             net_conn_unref(c);
-        } else if (c->closed) {
+        } else if (net_conn_is_closed(c)) {
             /* submit_read hit a hard failure (e.g. cap<=0): drop the retry ref */
             net_conn_unref(c);
         } else {
@@ -265,7 +265,7 @@ static void nf_iouring_submit_write(connection_t *c)
     conn_iouring_data_t *idata = (conn_iouring_data_t *)c->backend_data;
     if (!idata) return;
     iour_sub_t *sr = (iour_sub_t *)idata->reactor;
-    if (!sr || c->closed) {
+    if (!sr || net_conn_is_closed(c)) {
         idata->write_sqe_pending = 0;
         return;
     }
@@ -312,7 +312,10 @@ static void iouring_conn_closed(connection_t *c, iour_sub_t *sr,
 static void iouring_conn_closed_locked(connection_t *c, iour_sub_t *sr,
                                        net_framework_t *nf, int err)
 {
-    c->closed = 1;
+    /* CAS guard: error paths here can race with an external net_close_connection
+     * on another thread. Only the winner runs close(fd)/on_close/unref; the
+     * loser's in-flight ref is dropped by its own caller. */
+    if (!net_conn_try_close(c)) return;
 
     if (err > 0 && nf->on_error) nf->on_error(c, err);
 
@@ -337,8 +340,9 @@ static void iouring_conn_closed_locked(connection_t *c, iour_sub_t *sr,
 /* io_uring close connection. May be called from any thread. */
 static void nf_iouring_close_conn(connection_t *c)
 {
-    if (c->closed) return;
-    c->closed = 1;
+    /* CAS guard: exactly-once close against the sub reactor's error paths
+     * (iouring_conn_closed_locked) running concurrently. */
+    if (!net_conn_try_close(c)) return;
 
     conn_iouring_data_t *idata = (conn_iouring_data_t *)c->backend_data;
     if (!idata) {
@@ -412,8 +416,8 @@ static void *iour_sub_thread(void *arg)
                 for (int i = 0; i < sr->pending_count; i++) {
                     connection_t *pc = sr->pending_conns[i];
                     sr->pending_conns[i] = NULL;
-                    if (pc && !pc->closed) {
-                        if (submit_read(sr, pc) != 0 && !pc->closed) {
+                    if (pc && !net_conn_is_closed(pc)) {
+                        if (submit_read(sr, pc) != 0 && !net_conn_is_closed(pc)) {
                             /* SQ ring full: enqueue for retry. enqueue_retry
                              * takes its own ref, cancelling out the unref below. */
                             enqueue_retry(sr, pc);
@@ -454,7 +458,7 @@ static void *iour_sub_thread(void *arg)
                 conn_iouring_data_t *ridata = (conn_iouring_data_t *)c->backend_data;
                 sr->reading[c->fd] = 0;
 
-                if (c->closed) {
+                if (net_conn_is_closed(c)) {
                     if (ridata && ridata->buf_index >= 0 && sr->bufs_registered) {
                         free_buf(sr, ridata->buf_index);
                         ridata->buf_index = -1;
@@ -475,8 +479,8 @@ static void *iour_sub_thread(void *arg)
                      * for the next read to continue. */
                     int parse_ret = net_parse_frames(c, nf, cqe->res);
 
-                    if (parse_ret < 0 || c->closed) {
-                        if (!c->closed) {
+                    if (parse_ret < 0 || net_conn_is_closed(c)) {
+                        if (!net_conn_is_closed(c)) {
                             iouring_conn_closed(c, sr, nf, EBADMSG);
                         }
                         net_conn_unref(c);
@@ -485,7 +489,7 @@ static void *iour_sub_thread(void *arg)
                          * calls _locked). On SQ ring full, enqueue_retry takes a
                          * ref that cancels out the unref below (old in-flight ref). */
                         pthread_mutex_lock(&sr->conn_mtx);
-                        if (submit_read(sr, c) != 0 && !c->closed) {
+                        if (submit_read(sr, c) != 0 && !net_conn_is_closed(c)) {
                             enqueue_retry(sr, c);
                         }
                         pthread_mutex_unlock(&sr->conn_mtx);
@@ -500,7 +504,7 @@ static void *iour_sub_thread(void *arg)
                 conn_iouring_data_t *widata = (conn_iouring_data_t *)c->backend_data;
                 if (widata) widata->write_sqe_pending = 0;
 
-                if (c->closed) {
+                if (net_conn_is_closed(c)) {
                     net_conn_unref(c);
                     break;
                 }
@@ -522,7 +526,7 @@ static void *iour_sub_thread(void *arg)
                         }
                     }
                     /* If more data is queued, submit the next WRITE SQE */
-                    if (c->write_head && !c->closed) {
+                    if (c->write_head && !net_conn_is_closed(c)) {
                         widata->write_sqe_pending = 1;
                         write_task_t *nwt = c->write_head;
                         int nremain = nwt->len - nwt->offset;

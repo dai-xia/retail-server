@@ -69,8 +69,10 @@ static sub_reactor_t *pick_sub_reactor(nf_epoll_impl_t *impl)
 
 static void epoll_close_conn(connection_t *c)
 {
-    if (c->closed) return;
-    c->closed = 1;
+    /* CAS guard: if another thread (business thread calling net_close_connection,
+     * or a concurrent sub-reactor error path) already closed it, bail out.
+     * Prevents double close(fd) / double on_close / double unref. */
+    if (!net_conn_try_close(c)) return;
 
     conn_epoll_data_t *edata = (conn_epoll_data_t *)c->backend_data;
     if (edata) {
@@ -131,7 +133,7 @@ static void *epoll_sub_thread(void *arg)
             }
 
             connection_t *c = (connection_t *)events[i].data.ptr;
-            if (!c || c->closed) continue;
+            if (!c || net_conn_is_closed(c)) continue;
 
             if (events[i].events & (EPOLLERR | EPOLLHUP)) {
                 int err = (events[i].events & EPOLLERR) ? ECONNRESET : EPIPE;
@@ -164,7 +166,7 @@ static void *epoll_sub_thread(void *arg)
                 if (!read_ok) continue;
             }
 
-            if (!c->closed && (events[i].events & EPOLLOUT)) {
+            if (!net_conn_is_closed(c) && (events[i].events & EPOLLOUT)) {
                 pthread_mutex_lock(&c->write_lock);
                 write_task_t *wt = c->write_head;
 

@@ -105,6 +105,23 @@ struct connection_s {
     void *backend_data;
 };
 
+/* closed is accessed cross-thread (IO threads / thread pool / business threads).
+ * All reads/writes must go through the atomic helpers below. */
+static inline int net_conn_is_closed(connection_t *c)
+{
+    return __atomic_load_n(&c->closed, __ATOMIC_ACQUIRE);
+}
+
+/* Test-and-set the closed flag: returns 1 if this call performed the 0->1
+ * transition (caller owns the close path), 0 if another thread already did.
+ * Guarantees close(fd) / on_close / unref run exactly once per connection. */
+static inline int net_conn_try_close(connection_t *c)
+{
+    int expected = 0;
+    return __atomic_compare_exchange_n(&c->closed, &expected, 1,
+                                       0, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+}
+
 extern int nf_epoll_init(net_framework_t *nf);
 extern int nf_iouring_init(net_framework_t *nf);
 

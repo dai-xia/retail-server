@@ -136,7 +136,7 @@ void ServerManager::slotClientConnected(connection_t *conn, QString ip, int port
 {
     if(conn == nullptr) return;
 
-    if (conn->closed) {
+    if (net_conn_is_closed(conn)) {
         return;
     }
 

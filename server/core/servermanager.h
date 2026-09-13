@@ -18,7 +18,7 @@ public:
     void stopServer();
     bool isServerRunning();
 
-    // fd-based client management (called by BusinessManager)
+    // fd-based client management
     void sendToClient(int fd, const QByteArray &rawData);
     void sendToAllClients(const QByteArray &rawData);
     void closeClient(int fd);
@@ -26,7 +26,7 @@ public:
     QString getClientIp(int fd);
 
 signals:
-    // fd-based signals (connected by BusinessManager)
+    // fd-based signals
     void signalClientConnected(int fd, QString ip);
     void signalClientData(int fd, QByteArray rawData);
     void signalClientDisconnected(int fd);

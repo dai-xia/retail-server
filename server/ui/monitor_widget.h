@@ -14,10 +14,7 @@
 
 /**
  * @brief Real-time server-side monitoring panel.
- *
- * Control signaling runs over TCP JSON (monitor_start/stop sent to the client),
- * while video data is delivered via RTSP (client -> MediaMTX -> server pull).
- * This separation keeps control and media paths independent.
+ * Control signaling via TCP JSON; video via RTSP (client -> MediaMTX -> server pull).
  */
 class MonitorWidget : public QWidget
 {

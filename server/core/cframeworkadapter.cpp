@@ -81,8 +81,8 @@ void CFrameworkAdapter::stop()
     }
 
     if (m_netFramework) {
-        net_framework_stop(m_netFramework);     /* stop reactor threads first */
-        net_framework_destroy(m_netFramework);  /* then free resources */
+        net_framework_stop(m_netFramework);
+        net_framework_destroy(m_netFramework);
         m_netFramework = nullptr;
     }
 

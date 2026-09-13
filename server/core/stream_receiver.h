@@ -17,17 +17,9 @@ extern "C" {
 #endif
 
 /**
- * @brief RTSP stream receiver / decoder
+ * @brief RTSP stream receiver / decoder.
  *
- * FFmpeg decode flow:
- *   1. avformat_open_input() - open the stream (RTSP)
- *   2. avformat_find_stream_info() - probe stream info
- *   3. av_find_best_stream() - locate the video stream
- *   4. avcodec_alloc_context3() + avcodec_parameters_to_context() - set up the decoder
- *   5. avcodec_open2() - open the decoder
- *   6. av_read_frame() -> avcodec_send_packet() -> avcodec_receive_frame()
- *   7. sws_scale() YUV420P -> RGB24 -> QImage
- *   8. AAC decode -> swr_convert() FLTP -> S16LE -> ALSA playback
+ * Decodes video (YUV420P->RGB24->QImage) and audio (AAC FLTP->S16->ALSA).
  */
 class StreamReceiver : public QThread
 {
@@ -38,8 +30,8 @@ public:
     ~StreamReceiver();
 
     bool open(const QString &url);       ///< open stream (rtmp:// or file path)
-    void close();                        ///< close stream
-    bool isOpen() const;                 ///< is open
+    void close();
+    bool isOpen() const;
 
 signals:
     void frameReady(const QImage &frame);  ///< a decoded frame, sent to UI for display
@@ -51,7 +43,7 @@ protected:
 private:
     QImage convertFrameToQImage();  ///< YUV420P -> RGB24 -> QImage
     bool openAudio();               ///< find + open audio stream decoder, init ALSA
-    void closeAudio();              ///< close audio decoder + ALSA
+    void closeAudio();
     void playAudioFrame();          ///< decode FLTP -> S16LE -> ALSA write
 
 #ifdef USE_FFMPEG

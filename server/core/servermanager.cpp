@@ -130,8 +130,6 @@ QString ServerManager::getClientIp(int fd)
     return QString();
 }
 
-// ========== Slots ==========
-
 void ServerManager::slotClientConnected(connection_t *conn, QString ip, int port)
 {
     if(conn == nullptr) return;

@@ -9,7 +9,7 @@ MonitorWidget::MonitorWidget(QWidget *parent)
 {
     QVBoxLayout *mainLayout = new QVBoxLayout(this);
 
-    // ---- Top: client list + control buttons ----
+    // Top: client list + control buttons
     QHBoxLayout *controlLayout = new QHBoxLayout();
 
     m_clientList = new QListWidget();
@@ -39,12 +39,11 @@ MonitorWidget::MonitorWidget(QWidget *parent)
     controlLayout->addLayout(btnLayout);
     mainLayout->addLayout(controlLayout);
 
-    // ---- Bottom: video display area ----
+    // Bottom: video display area
     m_videoPlayer = new VideoPlayerWidget();
     m_videoPlayer->setMinimumSize(640, 480);
     mainLayout->addWidget(m_videoPlayer, 1);
 
-    // ---- Signal connections ----
     connect(m_btnRefresh, &QPushButton::clicked, this, &MonitorWidget::refreshClientList);
     connect(m_btnStart,   &QPushButton::clicked, this, &MonitorWidget::onStartMonitorClicked);
     connect(m_btnStop,    &QPushButton::clicked, this, &MonitorWidget::onStopMonitorClicked);
@@ -91,10 +90,9 @@ void MonitorWidget::onStartMonitorClicked()
     if (!rtspBase.endsWith("/")) rtspBase += "/";
     QString rtspUrl = rtspBase + clientId;
 
-    // 1. Send monitor_start command to the client
     BusinessManager::getInstance()->monitorStart(m_currentFd, rtspUrl);
 
-    // 2. Start local StreamReceiver (delayed start, wait for client to push stream)
+    // Start local StreamReceiver (delayed start, wait for client to push stream)
     if (m_receiver) {
         m_receiver->close();
         m_receiver->deleteLater();

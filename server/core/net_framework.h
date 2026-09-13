@@ -112,9 +112,8 @@ static inline int net_conn_is_closed(connection_t *c)
     return __atomic_load_n(&c->closed, __ATOMIC_ACQUIRE);
 }
 
-/* Test-and-set the closed flag: returns 1 if this call performed the 0->1
- * transition (caller owns the close path), 0 if another thread already did.
- * Guarantees close(fd) / on_close / unref run exactly once per connection. */
+/* Test-and-set the closed flag: returns 1 if this call did the 0->1
+ * transition, guaranteeing close(fd)/on_close/unref run exactly once. */
 static inline int net_conn_try_close(connection_t *c)
 {
     int expected = 0;
@@ -127,15 +126,12 @@ extern int nf_iouring_init(net_framework_t *nf);
 
 /**
  * @brief Create the network framework, defaulting to the epoll backend
- * @param port listen port
  * @return framework pointer on success, NULL on failure
  */
 net_framework_t* net_framework_create(int port);
 
 /**
  * @brief Create the network framework with a chosen IO backend (epoll / io_uring)
- * @param port listen port
- * @param backend backend type
  * @return framework pointer on success, NULL on failure
  */
 net_framework_t* net_framework_create_with_backend(int port, net_backend_t backend);
@@ -205,17 +201,7 @@ void net_conn_unref(connection_t *conn);
 int net_probe_io_uring_support(void);
 
 /**
- * @brief Core frame parser: extracts complete frames from the read buffer,
- *        handling TCP packet framing (sticky/half-packet issues).
- *
- * TCP is a byte stream with no boundaries, so framing relies on a custom
- * protocol (typically the first 4 bytes hold the body length, NET_HEAD_LEN).
- * Each complete frame triggers on_recv; leftover partial data stays in the
- * buffer to be combined with the next read.
- *
- * @param c          client connection
- * @param nf         owning framework
- * @param bytes_read bytes actually read this round
+ * @brief Core frame parser: extracts complete frames (handles sticky/half packets).
  * @return 0 on success, -1 if the connection should be closed
  */
 int net_parse_frames(connection_t *c, net_framework_t *nf, int bytes_read);

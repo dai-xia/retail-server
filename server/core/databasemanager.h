@@ -23,7 +23,6 @@ public:
                       int poolSize = 16);
     void closeDatabase();
 
-    /************************* Member API ************************/
     int memberRegister(const QString& uid, const QString& name, const QString& phone,
                        double initBalance, const QString& password = QString(),
                        const QString& facePath = QString(), const QString& faceFeature = QString(),
@@ -35,7 +34,6 @@ public:
     int memberVerifyPassword(const QString& uid, const QString& password);
     int memberQueryType(const QString& uid, int* type);
 
-    /************************* Goods & stock API ************************/
     int goodsAdd(const QString& clientId, const QString& goodsName, double price,
                  const QString& unit, int initStock);
     int goodsQueryById(int goodsId, goods_info_t* goods);
@@ -44,24 +42,20 @@ public:
     int goodsDelete(const QString& clientId, const QString& goodsName);
     int stockDeduct(const QString& clientId, const QString& goodsName, int deductNum);
 
-    /************************* Order API ************************/
     int orderQueryByCondition(const QString& condition, order_info_t* list, int* count);
     int orderQueryAll(order_info_t* list, int* count);
     int orderQueryById(int id, order_info_t* order);
 
-    /************************* Composite business API ************************/
     int goodsUpdateWithStock(const QString& clientId, const QString& goodsName,
                              double price, const QString& unit, int stock);
     int syncClientGoods(const QString& clientId, const QList<goods_info_t>& goodsList);
     int getGoodsId(const QString& clientId, const QString& goodsName);
 
-    /************************* Atomic transaction API ************************/
     int orderCreateAtomic(const QString& orderId, const QString& memberUid,
                           const QString& goodsList, double totalAmount,
                           QString& outMemberUid, double& outNewBalance);
     int balanceUpdateAtomic(const QString& memberUid, double amount, int type, double& outNewBalance);
 
-    /************************* OTA management API ************************/
     int otaAddVersion(const QString& version, const QString& filename,
                       const QString& sha256, int fileSize,
                       const QString& description, int forceUpdate,
@@ -71,7 +65,6 @@ public:
     int otaGetAllVersions(ota_version_t* list, int* count);
     int otaDeleteVersion(int id);
 
-    /************************* Balance log API ************************/
     int balanceLogQuery(const QString& memberUid, QList<QMap<QString, QVariant>>& logList,
                         int limit = 50);
 

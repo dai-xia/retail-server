@@ -16,7 +16,7 @@ void VideoPlayerWidget::displayFrame(const QImage &frame)
         QMutexLocker locker(&m_mutex);
         m_currentFrame = frame.copy();  /* Deep copy so the decode thread can release the source frame immediately */
     }
-    update();  /* Trigger async paintEvent */
+    update();
 }
 
 void VideoPlayerWidget::paintEvent(QPaintEvent *event)

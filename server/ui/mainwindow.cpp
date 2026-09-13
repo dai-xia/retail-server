@@ -94,7 +94,6 @@ void MainWindow::applyModernStyle()
     style += StyleHelper::commonButtonStyle();
     style += StyleHelper::commonTableStyle();
     style += StyleHelper::commonInputStyle();
-    // Main window specific QComboBox style
     style += "QComboBox {"
              "    background: #0f1419;"
              "    border: 2px solid #2d3a4a;"
@@ -117,7 +116,6 @@ void MainWindow::applyModernStyle()
              "    border: 1px solid #e94560;"
              "}";
     style += StyleHelper::commonGroupBoxStyle();
-    // Main window specific QTabWidget / QTabBar style
     style += "QTabWidget::pane {"
              "    border: 2px solid #2d3a4a;"
              "    border-radius: 8px;"
@@ -209,7 +207,6 @@ MainWindow::~MainWindow()
 
 void MainWindow::initSystem()
 {
-    // 1. Initialize database (delegated to BusinessManager)
     bool dbOk = BusinessManager::getInstance()->initDatabase();
     if(!dbOk)
     {
@@ -218,10 +215,8 @@ void MainWindow::initSystem()
     }
     slotAddLog("MySQL数据库初始化成功(连接池模式)");
 
-    // 1.5 Connect BusinessManager signals (Network -> Business)
     BusinessManager::getInstance()->initialize();
 
-    // 2. Create sub-widgets as independent windows (no parent)
     m_memberWidget = new MemberWidget(nullptr);
     m_goodsWidget = new GoodsWidget(nullptr);
     m_orderWidget = new OrderWidget(nullptr);
@@ -235,15 +230,11 @@ void MainWindow::initSystem()
     m_clientWidget->setWindowTitle("客户端监控");
     m_otaWidget->setWindowTitle("OTA升级管理");
 
-    // 3. Wire up signals (centralized in MainWindow)
+    // Wire up signals (centralized in MainWindow)
 
-    // === Network -> Business (receive path) ===
-    // Already connected in BusinessManager::initialize()
+    // Network <-> Business connections are already made in BusinessManager::initialize()
 
-    // === Business -> Network (send path) ===
-    // Already connected in BusinessManager::initialize()
-
-    // === Business -> UI (data change notifications) ===
+    // Business -> UI (data change notifications)
     connect(BusinessManager::getInstance(), &BusinessManager::signalAddLog,
             this, &MainWindow::slotAddLog);
     connect(BusinessManager::getInstance(), &BusinessManager::signalMemberDataChanged,
@@ -273,7 +264,6 @@ void MainWindow::initSystem()
 
     ui->textEdit_log->setReadOnly(true);
 
-    // 5. Start network server (delegated to BusinessManager)
     startServer();
 }
 

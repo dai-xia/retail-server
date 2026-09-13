@@ -21,28 +21,28 @@ public:
     static BusinessManager* getInstance();
     void initialize();
 
-    // Infrastructure (delegated to ServerManager / DatabaseManager)
+    // Infrastructure
     bool initDatabase();
     bool startServer(const QString& ip = "127.0.0.1", int port = 9090);
     void stopServer();
     bool isServerRunning();
 
-    // Client management (for UI)
+    // Client management
     QList<QPair<int, QString>> getConnectedClients();  // (fd, clientId or ip)
     QString getClientId(int fd);
     void kickClient(int fd);
     void sendToClient(int fd, const QString &jsonData);
     void sendToAllClients(const QString &jsonData);
 
-    // OTA push (moved from OtaWidget)
+    // OTA push
     void otaPushToClient(int fd, const QString &version);
     void otaPushToAll(const QString &version);
 
-    // Monitor control (server pushes monitor commands to clients)
+    // Monitor control
     void monitorStart(int fd, const QString &rtspUrl);
     void monitorStop(int fd);
 
-    // Member operations (for UI, delegate to DatabaseManager)
+    // Member operations
     int memberQueryAll(member_info_t *list, int *count);
     int memberQueryByUid(const QString &uid, member_info_t *member);
     int memberRegister(const QString &uid, const QString &name, const QString &phone,
@@ -52,7 +52,7 @@ public:
     int memberDelete(const QString &uid);
     int balanceLogQuery(const QString &uid, QList<QMap<QString, QVariant>> &logList, int limit = 50);
 
-    // Goods operations (for UI)
+    // Goods operations
     int goodsQueryAll(goods_info_t *list, int *count);
     int goodsQueryByClientId(const QString &clientId, goods_info_t *list, int *count);
     int goodsQueryById(int id, goods_info_t *goods);
@@ -62,12 +62,12 @@ public:
                     double price, const QString &unit, int stock);
     int goodsDelete(const QString &clientId, const QString &name);
 
-    // Order operations (for UI)
+    // Order operations
     int orderQueryAll(order_info_t *list, int *count);
     int orderQueryByCondition(const QString &condition, order_info_t *list, int *count);
     int orderQueryById(int orderId, order_info_t *order);
 
-    // OTA operations (for UI)
+    // OTA operations
     int otaAddVersion(const QString &version, const QString &filename, const QString &sha256,
                       int fileSize, const QString &description, int forceUpdate, int type);
     int otaGetAllVersions(ota_version_t *list, int *count);
@@ -91,7 +91,7 @@ signals:
 private:
     explicit BusinessManager(QObject *parent = nullptr);
 
-    /* Command dispatch table: O(1) routing replaces the if-else chain */
+    /* O(1) command dispatch table */
     typedef void (BusinessManager::*CmdHandler)(int fd, cJSON *root);
     QHash<QString, CmdHandler> m_dispatch;
     void initDispatch();

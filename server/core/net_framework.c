@@ -42,7 +42,6 @@ int net_set_nonblocking(int fd)
  *        (handles sticky/half packets).
  *
  * Wire protocol: [4-byte network-order length header][business payload].
- * Each complete frame is dispatched to the thread pool via on_recv.
  *
  * @return 0 on success, -1 on malformed data / buffer overflow (close conn)
  */

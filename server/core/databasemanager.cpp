@@ -9,9 +9,7 @@
 #include <crypt.h>
 #include <random>
 
-// =============================================================================
-//  RAII guard: auto acquire/release connection, auto rollback uncommitted txn
-// =============================================================================
+// RAII guard: auto acquire/release connection, auto rollback uncommitted txn
 class DbConn {
     DatabaseManager *m_mgr;
     QSqlDatabase m_db;
@@ -31,26 +29,6 @@ public:
     bool commit() { if (!m_active) return false; m_active = false; return m_db.commit(); }
     bool started() const { return m_active; }
 };
-
-// =============================================================================
-//  Helpers
-// =============================================================================
-/*
- * bcrypt password hashing
- *
- * Security comparison:
- *   Old: SHA-256 unsalted -> rainbow tables crack instantly, GPU brute-force fast
- *   New: bcrypt ($2b$12$) -> built-in random salt, tunable cost factor (12),
- *        strong GPU resistance
- *
- * bcrypt format: $2b$12$xxxxxxxxxxxxxxxxxxxxxxx...
- *                 ^    ^   ^
- *                 |    |   22-char salt + 31-char hash = 53 chars
- *                 |    cost factor (10-14); higher = slower = safer
- *                 version (2b is the standard)
- *
- * Total length: 3(version) + 1($) + 2(cost) + 1($) + 53 = 60 chars
- */
 
 static QString bcryptHash(const QString &password) {
     const int cost = 12;
@@ -102,9 +80,6 @@ static time_t parseTimeString(const QString &s) {
     return mktime(&tm);
 }
 
-// =============================================================================
-//  Singleton / ctor / dtor
-// =============================================================================
 DatabaseManager::DatabaseManager(QObject *parent)
     : QObject(parent), m_poolSize(16), m_initialized(false), m_port(3306) {}
 
@@ -120,9 +95,6 @@ DatabaseManager *DatabaseManager::getInstance() {
     return s_instance;
 }
 
-// =============================================================================
-//  Connection pool
-// =============================================================================
 QSqlDatabase DatabaseManager::getConnection() {
     QMutexLocker lock(&m_poolMutex);
     while (m_connNames.isEmpty()) {
@@ -155,9 +127,6 @@ void DatabaseManager::releaseConnection(QSqlDatabase &conn) {
     conn = QSqlDatabase();
 }
 
-// =============================================================================
-//  Init / table creation / close
-// =============================================================================
 bool DatabaseManager::initDatabase(const QString &host, int port, const QString &dbName,
                                    const QString &user, const QString &password, int poolSize) {
     if (m_initialized) return true;
@@ -283,9 +252,6 @@ void DatabaseManager::closeDatabase() {
     m_initialized = false;
 }
 
-// =============================================================================
-//  Atomic transactions
-// =============================================================================
 int DatabaseManager::orderCreateAtomic(const QString &orderId, const QString &memberUid,
                                        const QString &goodsList, double totalAmount,
                                        QString &outMemberUid, double &outNewBalance) {
@@ -359,9 +325,6 @@ int DatabaseManager::balanceUpdateAtomic(const QString &memberUid, double amount
     return 0;
 }
 
-// =============================================================================
-//  Member management
-// =============================================================================
 int DatabaseManager::memberRegister(const QString &uid, const QString &name, const QString &phone,
                                     double initBalance, const QString &password,
                                     const QString &facePath, const QString &faceFeature, int memberType) {
@@ -501,9 +464,6 @@ int DatabaseManager::memberQueryType(const QString &uid, int *type) {
     return 0;
 }
 
-// =============================================================================
-//  Goods & stock
-// =============================================================================
 int DatabaseManager::goodsAdd(const QString &clientId, const QString &goodsName, double price,
                               const QString &unit, int initStock) {
     DbConn c(this);
@@ -616,9 +576,6 @@ int DatabaseManager::stockDeduct(const QString &clientId, const QString &goodsNa
     return t.commit() ? 0 : -1;
 }
 
-// =============================================================================
-//  Order management
-// =============================================================================
 static void fillOrder(QSqlQuery &q, order_info_t *o) {
     o->id = q.value(0).toInt();
     safeCopy(o->order_id, q.value(1).toString(), sizeof(o->order_id));
@@ -672,9 +629,6 @@ int DatabaseManager::orderQueryById(int id, order_info_t *o) {
     return 0;
 }
 
-// =============================================================================
-//  Composite business
-// =============================================================================
 int DatabaseManager::goodsUpdateWithStock(const QString &clientId, const QString &goodsName,
                                           double price, const QString &unit, int stock) {
     DbConn c(this);
@@ -729,9 +683,6 @@ int DatabaseManager::getGoodsId(const QString &clientId, const QString &goodsNam
     return q.value(0).toInt();
 }
 
-// =============================================================================
-//  OTA
-// =============================================================================
 int DatabaseManager::otaAddVersion(const QString &version, const QString &filename,
                                    const QString &sha256, int fileSize,
                                    const QString &description, int forceUpdate, int type) {
@@ -806,9 +757,6 @@ int DatabaseManager::otaDeleteVersion(int id) {
     return q.exec() ? 0 : -1;
 }
 
-// =============================================================================
-//  Balance log
-// =============================================================================
 int DatabaseManager::balanceLogQuery(const QString &memberUid, QList<QMap<QString, QVariant>> &logList, int limit) {
     logList.clear();
     DbConn c(this);

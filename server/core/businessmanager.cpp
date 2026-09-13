@@ -21,7 +21,6 @@ static bool isValidOtaName(const QString &s) {
     return !s.contains("..");
 }
 
-// File-static helper: calculate cosine similarity between two feature JSON objects
 double BusinessManager::calculateSimilarity(cJSON* feature1, cJSON* feature2)
 {
     cJSON* featureArray1 = cJSON_GetObjectItem(feature1, "feature");
@@ -144,8 +143,6 @@ bool BusinessManager::isServerRunning()
     return ServerManager::getInstance()->isServerRunning();
 }
 
-/************************* UI-facing methods *************************/
-
 QList<QPair<int, QString>> BusinessManager::getConnectedClients()
 {
     QMutexLocker lock(&m_clientMapMutex);
@@ -238,16 +235,9 @@ void BusinessManager::otaPushToAll(const QString &version)
     free(json);
 }
 
-/************************* Monitor control (server push) *************************/
-
 /**
  * @brief Push a start-monitor command to a client
- * @param fd      client connection fd
  * @param rtspUrl RTSP URL the client should stream to
- *
- * Flow: server UI picks a client -> send {"cmd":"monitor_start","rtsp_url":...}
- * -> client opens the camera + RTSP push -> server StreamReceiver pulls and
- * decodes the RTSP stream for display.
  */
 void BusinessManager::monitorStart(int fd, const QString &rtspUrl)
 {
@@ -280,8 +270,6 @@ void BusinessManager::monitorStop(int fd)
 
     emit signalAddLog(QString("stop-monitor command sent to client (fd=%1)").arg(fd));
 }
-
-/************************* Member operations (for UI) *************************/
 
 int BusinessManager::memberQueryAll(member_info_t *list, int *count)
 {
@@ -321,8 +309,6 @@ int BusinessManager::balanceLogQuery(const QString &uid, QList<QMap<QString, QVa
 {
     return DatabaseManager::getInstance()->balanceLogQuery(uid, logList, limit);
 }
-
-/************************* Goods operations (for UI) *************************/
 
 int BusinessManager::goodsQueryAll(goods_info_t *list, int *count)
 {
@@ -364,8 +350,6 @@ int BusinessManager::goodsDelete(const QString &clientId, const QString &name)
     return r;
 }
 
-/************************* Order operations (for UI) *************************/
-
 int BusinessManager::orderQueryAll(order_info_t *list, int *count)
 {
     return DatabaseManager::getInstance()->orderQueryAll(list, count);
@@ -380,8 +364,6 @@ int BusinessManager::orderQueryById(int orderId, order_info_t *order)
 {
     return DatabaseManager::getInstance()->orderQueryById(orderId, order);
 }
-
-/************************* OTA operations (for UI) *************************/
 
 int BusinessManager::otaAddVersion(const QString &version, const QString &filename, const QString &sha256,
                                     int fileSize, const QString &description, int forceUpdate, int type)

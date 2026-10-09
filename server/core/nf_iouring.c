@@ -2,7 +2,9 @@
  * nf_iouring.c — io_uring network backend (built on liburing)
  *
  * Architecture: main Reactor (ACCEPT) + 4 sub Reactors (READ/WRITE) + thread pool.
- * Uses liburing's standard interface; io_uring_get_sqe() is thread-safe by itself.
+ * A liburing ring is NOT thread-safe (io_uring_get_sqe races on sqe_tail), and
+ * business threads submit WRITE/CANCEL SQEs concurrently — every ring access
+ * goes through the per-ring submit_mtx.
  */
 
 #include "nf_iouring.h"
@@ -10,6 +12,7 @@
 #include <arpa/inet.h>
 #include <netdb.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <sys/eventfd.h>
 #include <errno.h>
 
@@ -36,6 +39,12 @@ typedef struct {
     int buf_index;              /* fixed-buffer index, -1 = pool unused (fallback to per-conn buffer) */
 } conn_iouring_data_t;
 
+/* One deferred-close request, queued to the owning sub reactor */
+typedef struct {
+    connection_t *c;
+    int err;
+} reap_entry_t;
+
 typedef struct {
     struct io_uring  ring;          /* liburing instance, owned by this sub thread */
     int              event_fd;     /* eventfd: cross-thread wakeup for the sub Reactor */
@@ -45,13 +54,16 @@ typedef struct {
     net_framework_t *nf;
     connection_t    *conns[65536];  /* fd -> connection map */
     int              reading[65536]; /* 1 = a READ SQE for this fd is in flight */
-    connection_t    *pending_conns[512]; /* new conns handed over by the main thread */
+    connection_t   **pending_conns; /* growable: new conns handed over by the main thread */
     int              pending_count;
-    connection_t    *closed_conns[512];  /* conns to reap */
+    int              pending_cap;
+    reap_entry_t    *closed_conns;  /* growable: conns to reap (deferred close), with error code */
     int              closed_count;
+    int              closed_cap;
     connection_t    *retry_conns[256];   /* conns waiting for an SQE slot; resubmitted next round */
     int              retry_count;
     pthread_mutex_t  conn_mtx;     /* protects pending/closed/retry arrays + conns[] */
+    pthread_mutex_t  submit_mtx;   /* serializes ring get_sqe/prep/submit (ring not thread-safe) */
     int              running;
 
     /* Fixed-buffer pool */
@@ -78,6 +90,9 @@ static void iouring_conn_closed_locked(connection_t *c, iour_sub_t *sr,
 static int  submit_read(iour_sub_t *sr, connection_t *c);
 static void enqueue_retry(iour_sub_t *sr, connection_t *c);
 static void process_retry(iour_sub_t *sr);
+static int  grow_pending(iour_sub_t *sr);
+static int  enqueue_closed(iour_sub_t *sr, connection_t *c, int err);
+static void reap_closed(iour_sub_t *sr, net_framework_t *nf);
 static int  nf_iouring_start(net_framework_t *nf);
 static void nf_iouring_stop(net_framework_t *nf);
 static void nf_iouring_destroy_impl(net_framework_t *nf);
@@ -179,10 +194,13 @@ static int submit_read(iour_sub_t *sr, connection_t *c)
         return -1;
     }
 
-    /* io_uring_get_sqe() is thread-safe internally; no external lock needed */
+    /* The ring is shared with business threads (WRITE/CANCEL submissions);
+     * get_sqe races on sqe_tail, so the whole prep+submit is serialized. */
+    pthread_mutex_lock(&sr->submit_mtx);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&sr->ring);
     if (!sqe) {
         /* SQ ring full: caller enqueues retry; we don't wake here */
+        pthread_mutex_unlock(&sr->submit_mtx);
         return -1;
     }
 
@@ -197,6 +215,7 @@ static int submit_read(iour_sub_t *sr, connection_t *c)
     sr->reading[c->fd] = 1;
     net_conn_ref(c);  /* ref for in-flight READ SQE */
     io_uring_submit(&sr->ring);
+    pthread_mutex_unlock(&sr->submit_mtx);
     return 0;
 }
 
@@ -259,6 +278,91 @@ static void process_retry(iour_sub_t *sr)
     }
 }
 
+/* Growable pending/closed arrays: no fixed capacity, so neither the new-conn
+ * handover nor the deferred-close queue can overflow. Callers must hold
+ * conn_mtx (both arrays live behind that lock). */
+
+static int grow_pending(iour_sub_t *sr)
+{
+    if (sr->pending_count < sr->pending_cap) return 0;
+    int ncap = sr->pending_cap ? sr->pending_cap * 2 : 128;
+    connection_t **n = realloc(sr->pending_conns, (size_t)ncap * sizeof(*n));
+    if (!n) return -1;
+    sr->pending_conns = n;
+    sr->pending_cap = ncap;
+    return 0;
+}
+
+/* Push a deferred-close request (grows closed_conns in place). Caller must
+ * hold conn_mtx. Returns 0 on success, -1 on OOM (caller falls back to
+ * inline cleanup). */
+static int enqueue_closed(iour_sub_t *sr, connection_t *c, int err)
+{
+    if (sr->closed_count >= sr->closed_cap) {
+        int ncap = sr->closed_cap ? sr->closed_cap * 2 : 128;
+        reap_entry_t *n = realloc(sr->closed_conns, (size_t)ncap * sizeof(*n));
+        if (!n) return -1;
+        sr->closed_conns = n;
+        sr->closed_cap = ncap;
+    }
+    sr->closed_conns[sr->closed_count].c = c;
+    sr->closed_conns[sr->closed_count].err = err;
+    sr->closed_count++;
+    return 0;
+}
+
+/* Single execution point for ALL connection teardown, runs on the owning sub
+ * reactor thread. The close came in as a deferred request (CAS already won), so
+ * close(fd)/table-clearing/free_buf/on_close/unref all happen exactly once from
+ * the thread that owns conns[]. Caller must hold conn_mtx. */
+static void reap_closed(iour_sub_t *sr, net_framework_t *nf)
+{
+    for (int i = 0; i < sr->closed_count; i++) {
+        connection_t *cc = sr->closed_conns[i].c;
+        int err = sr->closed_conns[i].err;
+        sr->closed_conns[i].c = NULL;
+        if (!cc) continue;
+
+        conn_iouring_data_t *idata = (conn_iouring_data_t *)cc->backend_data;
+        if (idata) idata->write_sqe_pending = 0;
+
+        /* Retire any still-in-flight READ so a soon-to-be-reused fd cannot read
+         * stale data from this connection. UR_OP_READ handler retires the ref;
+         * if a READ CQE for this fd is still queued, cancel it here. */
+        if (idata && cc->fd >= 0 && cc->fd < 65536 && sr->reading[cc->fd]) {
+            pthread_mutex_lock(&sr->submit_mtx);
+            struct io_uring_sqe *sqe = io_uring_get_sqe(&sr->ring);
+            if (sqe) {
+                io_uring_prep_cancel(sqe, UR_MAKE_UD(UR_OP_READ, cc), 0);
+                io_uring_sqe_set_data(sqe, UR_MAKE_UD(UR_OP_CANCEL, NULL));
+                io_uring_submit(&sr->ring);
+            }
+            pthread_mutex_unlock(&sr->submit_mtx);
+        }
+
+        /* Release the fixed buffer back to the pool */
+        if (idata && idata->buf_index >= 0) {
+            free_buf(sr, idata->buf_index);
+            idata->buf_index = -1;
+        }
+
+        /* Clear reader slots and close the fd. Single-owner thread, so no
+         * cross-thread race; the conns[fd]==cc guard still protects the fd-reuse
+         * window if a new conn grabbed the same number before this ran. */
+        if (cc->fd >= 0 && cc->fd < 65536) {
+            sr->reading[cc->fd] = 0;
+            if (sr->conns[cc->fd] == cc) sr->conns[cc->fd] = NULL;
+        }
+        close(cc->fd);
+
+        if (nf && err > 0 && nf->on_error) nf->on_error(cc, err);
+        if (nf && nf->on_close) nf->on_close(cc);
+
+        net_conn_unref(cc);  /* base ref (from conns[]) */
+    }
+    sr->closed_count = 0;
+}
+
 /* Submit a WRITE SQE. May be called from any thread. */
 static void nf_iouring_submit_write(connection_t *c)
 {
@@ -281,8 +385,12 @@ static void nf_iouring_submit_write(connection_t *c)
     }
     int remain = wt->len - wt->offset;
 
+    /* Business threads land here concurrently on the same ring: serialize
+     * get_sqe/prep/submit with submit_mtx (lock order: write_lock -> submit_mtx). */
+    pthread_mutex_lock(&sr->submit_mtx);
     struct io_uring_sqe *sqe = io_uring_get_sqe(&sr->ring);
     if (!sqe) {
+        pthread_mutex_unlock(&sr->submit_mtx);
         pthread_mutex_unlock(&c->write_lock);
         idata->write_sqe_pending = 0;
         uint64_t val = 1;
@@ -294,8 +402,9 @@ static void nf_iouring_submit_write(connection_t *c)
     io_uring_sqe_set_data(sqe, UR_MAKE_UD(UR_OP_WRITE, c));
 
     net_conn_ref(c);  /* ref for in-flight WRITE SQE */
-    pthread_mutex_unlock(&c->write_lock);
     io_uring_submit(&sr->ring);
+    pthread_mutex_unlock(&sr->submit_mtx);
+    pthread_mutex_unlock(&c->write_lock);
 }
 
 /* Lock-acquiring variant of iouring_conn_closed_locked. */
@@ -307,87 +416,41 @@ static void iouring_conn_closed(connection_t *c, iour_sub_t *sr,
     pthread_mutex_unlock(&sr->conn_mtx);
 }
 
-/* Caller already holds sr->conn_mtx. Same logic as iouring_conn_closed but
- * skips locking, to avoid recursive deadlock from enqueue_retry/process_retry. */
 static void iouring_conn_closed_locked(connection_t *c, iour_sub_t *sr,
                                        net_framework_t *nf, int err)
 {
-    /* CAS guard: error paths here can race with an external net_close_connection
-     * on another thread. Only the winner runs close(fd)/on_close/unref; the
-     * loser's in-flight ref is dropped by its own caller. */
+
     if (!net_conn_try_close(c)) return;
 
-    if (err > 0 && nf->on_error) nf->on_error(c, err);
-
-    close(c->fd);
-
-    if (c->fd >= 0 && c->fd < 65536 && sr->conns[c->fd] == c) {
-        sr->conns[c->fd] = NULL;
-    }
-    sr->reading[c->fd] = 0;
-
-    conn_iouring_data_t *idata = (conn_iouring_data_t *)c->backend_data;
-    if (idata && idata->buf_index >= 0) {
-        free_buf(sr, idata->buf_index);
-        idata->buf_index = -1;
-        c->rbuf_ptr = NULL;
+    if (enqueue_closed(sr, c, err) < 0) {
+        if (nf && err > 0 && nf->on_error) nf->on_error(c, err);
+        if (c->fd >= 0 && c->fd < 65536 && sr->conns[c->fd] == c) sr->conns[c->fd] = NULL;
+        if (c->fd >= 0 && c->fd < 65536) sr->reading[c->fd] = 0;
+        close(c->fd);
+        if (nf && nf->on_close) nf->on_close(c);
+        net_conn_unref(c);
+        return;
     }
 
-    if (nf->on_close) nf->on_close(c);
-    net_conn_unref(c);
+    /* Wake so the sub reactor reaps it next round. Safe from any thread. */
+    uint64_t val = 1;
+    (void)write(sr->event_fd, &val, sizeof(val));
 }
 
 /* io_uring close connection. May be called from any thread. */
 static void nf_iouring_close_conn(connection_t *c)
 {
-    /* CAS guard: exactly-once close against the sub reactor's error paths
-     * (iouring_conn_closed_locked) running concurrently. */
-    if (!net_conn_try_close(c)) return;
-
     conn_iouring_data_t *idata = (conn_iouring_data_t *)c->backend_data;
     if (!idata) {
-        close(c->fd);
-        if (c->nf && c->nf->on_close) c->nf->on_close(c);
-        net_conn_unref(c);
+        if (net_conn_try_close(c)) {
+            close(c->fd);
+            if (c->nf && c->nf->on_close) c->nf->on_close(c);
+            net_conn_unref(c);
+        }
         return;
     }
-
     iour_sub_t *sr = (iour_sub_t *)idata->reactor;
-    idata->write_sqe_pending = 0;
-
-    /* Cancel any in-flight READ SQE so a reused fd doesn't read stale data */
-    if (sr && c->fd >= 0 && c->fd < 65536 && sr->reading[c->fd]) {
-        struct io_uring_sqe *sqe = io_uring_get_sqe(&sr->ring);
-        if (sqe) {
-            io_uring_prep_cancel(sqe, UR_MAKE_UD(UR_OP_READ, c), 0);
-            io_uring_sqe_set_data(sqe, UR_MAKE_UD(UR_OP_CANCEL, NULL));
-            io_uring_submit(&sr->ring);
-        }
-    }
-
-    /* Return the fixed buffer to the pool */
-    if (idata->buf_index >= 0 && sr) {
-        free_buf(sr, idata->buf_index);
-        idata->buf_index = -1;
-    }
-
-    /* Submit the CANCEL SQE before close(fd); we don't wait for the cancel
-     * to take effect. */
-    close(c->fd);
-
-    /* Add to closed_conns so the sub reactor can clear conns[] */
-    if (sr) {
-        pthread_mutex_lock(&sr->conn_mtx);
-        if (sr->closed_count < 512) {
-            sr->closed_conns[sr->closed_count++] = c;
-        }
-        pthread_mutex_unlock(&sr->conn_mtx);
-
-        uint64_t val = 1;
-        (void)write(sr->event_fd, &val, sizeof(val));
-    }
-
-    if (c->nf && c->nf->on_close) c->nf->on_close(c);
+    iouring_conn_closed(c, sr, sr->nf, 0);
 }
 
 /* Sub Reactor worker thread */
@@ -427,26 +490,24 @@ static void *iour_sub_thread(void *arg)
                 }
                 sr->pending_count = 0;
 
-                for (int i = 0; i < sr->closed_count; i++) {
-                    connection_t *cc = sr->closed_conns[i];
-                    sr->closed_conns[i] = NULL;
-                    if (cc && cc->fd >= 0 && cc->fd < 65536 && sr->conns[cc->fd] == cc) {
-                        sr->conns[cc->fd] = NULL;
-                        sr->reading[cc->fd] = 0;
-                    }
-                    net_conn_unref(cc);
-                }
-                sr->closed_count = 0;
+                /* Deferred-close queue: NO op is copied here — each request is
+                 * never touched from any thread other than the owning sub reactor.
+                 * The pending loop above already reset the array slots; reap_closed
+                 * owns all teardown (close(fd)/clear/on_close/unref). */
+                reap_closed(sr, nf);
                 pthread_mutex_unlock(&sr->conn_mtx);
 
                 /* Resubmit the eventfd READ */
+                pthread_mutex_lock(&sr->submit_mtx);
                 struct io_uring_sqe *esqe = io_uring_get_sqe(&sr->ring);
                 if (esqe) {
                     io_uring_prep_read(esqe, sr->event_fd, &sr->event_buf, 8, 0);
                     io_uring_sqe_set_data(esqe, UR_MAKE_UD(UR_OP_EVENT,
                         (void *)(uintptr_t)(long)sr->event_fd));
                     io_uring_submit(&sr->ring);
-                } else {
+                }
+                pthread_mutex_unlock(&sr->submit_mtx);
+                if (!esqe) {
                     uint64_t val = 1;
                     (void)write(sr->event_fd, &val, sizeof(val));
                 }
@@ -525,12 +586,15 @@ static void *iour_sub_thread(void *arg)
                             free(wt);
                         }
                     }
-                    /* If more data is queued, submit the next WRITE SQE */
+                    /* If more data is queued, submit the next WRITE SQE.
+                     * write_lock is held; ring access still needs submit_mtx
+                     * (lock order: write_lock -> submit_mtx). */
                     if (c->write_head && !net_conn_is_closed(c)) {
                         widata->write_sqe_pending = 1;
                         write_task_t *nwt = c->write_head;
                         int nremain = nwt->len - nwt->offset;
 
+                        pthread_mutex_lock(&sr->submit_mtx);
                         struct io_uring_sqe *wsqe = io_uring_get_sqe(&sr->ring);
                         if (wsqe) {
                             io_uring_prep_write(wsqe, c->fd,
@@ -541,6 +605,7 @@ static void *iour_sub_thread(void *arg)
                         } else {
                             widata->write_sqe_pending = 0;
                         }
+                        pthread_mutex_unlock(&sr->submit_mtx);
                     }
                     pthread_mutex_unlock(&c->write_lock);
                     net_conn_unref(c);
@@ -597,12 +662,14 @@ static void assign_connection(nf_iouring_impl_t *impl, connection_t *c, net_fram
             net_conn_unref(sr->conns[c->fd]);
         }
         sr->conns[c->fd] = c;
-        if (sr->pending_count < 512) {
+        /* Growable pending queue: never overflows (the old fixed 512 array could
+         * spill, leaking connections). Only OOM fails, then fall back to
+         * submitting the read directly. */
+        if (grow_pending(sr) == 0) {
             sr->pending_conns[sr->pending_count++] = c;
             net_conn_ref(c);
         } else {
-            fprintf(stderr, "io_uring: pending_conns full, submitting read directly fd=%d\n", c->fd);
-            if (submit_read(sr, c) != 0 && !c->closed) {
+            if (submit_read(sr, c) != 0 && !net_conn_is_closed(c)) {
                 /* SQ ring full (already holding conn_mtx): enqueue for retry */
                 enqueue_retry(sr, c);
             }
@@ -637,9 +704,14 @@ static int create_sub_reactor(iour_sub_t *sr, int index, net_framework_t *nf)
     sr->nf = nf;
     sr->running = 1;
     sr->pending_count = 0;
+    sr->pending_cap = 0;
+    sr->pending_conns = NULL;
     sr->closed_count = 0;
+    sr->closed_cap = 0;
+    sr->closed_conns = NULL;
 
     pthread_mutex_init(&sr->conn_mtx, NULL);
+    pthread_mutex_init(&sr->submit_mtx, NULL);
 
     /* Fixed-buffer pool (512 buffers) for read_fixed zero-copy. On failure the
      * framework degrades to per-connection buffers automatically. */
@@ -666,12 +738,22 @@ static void destroy_sub_reactor(iour_sub_t *sr)
     (void)write(sr->event_fd, &val, sizeof(val));
     pthread_join(sr->tid, NULL);
 
+    /* Drain leftover conn refs (sub thread joined, no concurrency).
+     * Base refs are held via conns[]; pending entries hold one extra ref (taken
+     * in assign_connection). Closed entries take NO ref (base still in conns[]). */
     for (int i = 0; i < 65536; i++) {
         if (sr->conns[i]) {
             net_conn_unref(sr->conns[i]);
             sr->conns[i] = NULL;
         }
     }
+    for (int i = 0; i < sr->pending_count; i++) {
+        if (sr->pending_conns[i]) {
+            net_conn_unref(sr->pending_conns[i]);
+            sr->pending_conns[i] = NULL;
+        }
+    }
+    sr->pending_count = 0;
 
     /* Drain leftover retry-queue refs (sub thread joined, no concurrency) */
     for (int i = 0; i < sr->retry_count; i++) {
@@ -682,11 +764,17 @@ static void destroy_sub_reactor(iour_sub_t *sr)
     }
     sr->retry_count = 0;
 
+    free(sr->pending_conns);
+    sr->pending_conns = NULL;
+    free(sr->closed_conns);
+    sr->closed_conns = NULL;
+
     destroy_buf_pool(sr);
 
     if (sr->event_fd >= 0) close(sr->event_fd);
     io_uring_queue_exit(&sr->ring);
     pthread_mutex_destroy(&sr->conn_mtx);
+    pthread_mutex_destroy(&sr->submit_mtx);
 }
 
 static void submit_accept(nf_iouring_impl_t *impl, net_framework_t *nf)
